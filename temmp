@@ -3,19 +3,14 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <expected>
-#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <netinet/tcp.h>
 #include <optional>
 #include <string_view>
-#include <sys/signal.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <system_error>
 #include <unistd.h>
 #include <utility>
-#include <vector>
 
 namespace net {
 enum class tcp_stream_error { invalid_address_format };
@@ -51,15 +46,10 @@ make_error_code(tcp_stream_error e) noexcept {
 
 class tcp_streambuf : public std::streambuf {
 public:
-  explicit tcp_streambuf(int sock_fd)
-      : _sock_fd(sock_fd), _input_buffer(1024),
-        _output_buffer(1024) {
-    setg(_input_buffer.data(),
-         _input_buffer.data() + _input_buffer.size(),
-         _input_buffer.data() + _input_buffer.size());
-
-    setp(_output_buffer.data(),
-         _output_buffer.data() + _output_buffer.size());
+  explicit tcp_streambuf(int sock_fd) : _sock_fd(sock_fd) {
+    setg(_input_buffer, _input_buffer, _input_buffer);
+    setp(_output_buffer,
+         _output_buffer + _output_buffer_size - 1);
   }
 
 protected:
@@ -68,26 +58,22 @@ protected:
       return traits_type::to_int_type(*gptr());
     }
 
-    int num = read(_sock_fd, _input_buffer.data(),
-                   _input_buffer.size());
-    if (num <= 0) {
+    int num = recv(_sock_fd, _input_buffer,
+                   _input_buffer_size, 0);
+    if (num <= 0) { // error or connection closed
       return traits_type::eof();
     }
 
-    setg(_input_buffer.data(), _input_buffer.data(),
-         _input_buffer.data() + num);
-
+    setg(_input_buffer, _input_buffer, _input_buffer + num);
     return traits_type::to_int_type(*gptr());
   }
 
-  // Override overflow for output
-  int_type
-  overflow(int_type ch = traits_type::eof()) override {
-    if (!traits_type::eq_int_type(ch, traits_type::eof())) {
-      *pptr() = traits_type::to_char_type(ch);
+  int_type overflow(int_type ch) override {
+    if (ch != traits_type::eof()) {
+      *pptr() = ch;
       pbump(1);
     }
-    
+
     if (sync() == 0) {
       return ch;
     } else {
@@ -95,12 +81,10 @@ protected:
     }
   }
 
-  // Override sync for output
   int sync() override {
     int num = pptr() - pbase();
-    if (write(_sock_fd, _output_buffer.data(), num) !=
-        num) {
-      return -1;
+    if (send(_sock_fd, _output_buffer, num, 0) != num) {
+      return -1; // error
     }
 
     pbump(-num); // reset put pointer
@@ -108,16 +92,16 @@ protected:
   }
 
 private:
+  static constexpr size_t _input_buffer_size = 1024;
+  static constexpr size_t _output_buffer_size = 1024;
+  char _input_buffer[_input_buffer_size];
+  char _output_buffer[_output_buffer_size];
   int _sock_fd;
-  std::vector<char> _input_buffer;
-  std::vector<char> _output_buffer;
 };
 
 class tcp_stream : public std::iostream {
 public:
   tcp_stream(const tcp_stream &) = delete;
-
-  tcp_stream &operator=(const tcp_stream &) = delete;
 
   tcp_stream(tcp_stream &&other) noexcept
       : std::iostream(nullptr),
@@ -126,11 +110,13 @@ public:
     rdbuf(&_streambuf);
   }
 
-  explicit tcp_stream(int sock_fd)
+  explicit tcp_stream(int sock_fd) noexcept
       : std::iostream(nullptr), _sock_fd(sock_fd),
         _streambuf(_sock_fd) {
     rdbuf(&_streambuf);
   }
+
+  tcp_stream &operator=(const tcp_stream &) = delete;
 
   tcp_stream &operator=(tcp_stream &&other) noexcept {
     if (this != &other) {
@@ -141,69 +127,16 @@ public:
     return *this;
   }
 
-  bool set_nodelay(bool enabled) noexcept {
-    int flag = enabled ? 0 : 1;
-    if (setsockopt(_sock_fd, IPPROTO_TCP, TCP_NODELAY,
-                   (char *)&flag, sizeof(int)) < 0) {
-      return false;
-    }
-
-    return true;
-  }
-
-  bool set_keep_alive(bool enabled, int idle_time = 30,
-                      int interval = 10,
-                      int max_probes = 5) noexcept {
-    int optval = enabled ? 1 : 0;
-    if (setsockopt(_sock_fd, SOL_SOCKET, SO_KEEPALIVE,
-                   &optval, sizeof(optval)) < 0) {
-      return false;
-    }
-
-    if (enabled) {
-      // Set the idle time before starting keep-alive probes
-      if (setsockopt(_sock_fd, IPPROTO_TCP, TCP_KEEPIDLE,
-                     &idle_time, sizeof(idle_time)) < 0) {
-        return false;
-      }
-
-      // Set the interval between keep-alive probes
-      if (setsockopt(_sock_fd, IPPROTO_TCP, TCP_KEEPINTVL,
-                     &interval, sizeof(interval)) < 0) {
-        return false;
-      }
-
-      // Set the max number of keep-alive probes
-      if (setsockopt(_sock_fd, IPPROTO_TCP, TCP_KEEPCNT,
-                     &max_probes, sizeof(max_probes)) < 0) {
-        return false;
-      }
-    }
-
-    return true;
-  }
-
-  bool set_nonblocking(bool enabled) {
-    int flags = fcntl(_sock_fd, F_GETFL, 0);
-    if (flags < 0) {
-      return false;
-    }
-
-    if (enabled) {
-      flags |= O_NONBLOCK;
-    } else {
-      flags &= ~O_NONBLOCK;
-    }
-
-    if (fcntl(_sock_fd, F_SETFL, flags) != 0) {
-      return false;
-    }
-
-    return true;
-  }
+  static std::optional<tcp_stream>
+  connect(std::string_view addr) noexcept;
 
   static std::expected<tcp_stream, std::error_code>
-  connect(std::string_view addr) noexcept;
+  connect2(std::string_view addr) noexcept;
+
+  ~tcp_stream() noexcept {
+    if (_sock_fd >= 0)
+      close(_sock_fd);
+  }
 
 private:
   int _sock_fd;
@@ -230,9 +163,8 @@ tcp_stream::connect(std::string_view addr_str) noexcept {
   addr_hints.ai_family = AF_UNSPEC;
   addr_hints.ai_socktype = SOCK_STREAM;
 
-  if (auto result =
-          getaddrinfo(hostname.c_str(), port.c_str(),
-                      &addr_hints, &addr);
+  if (auto result = getaddrinfo(
+          hostname.c_str(), port.c_str(), &addr_hints, &addr);
       result != 0) {
     return std::unexpected(
         std::error_code(result, std::system_category()));
