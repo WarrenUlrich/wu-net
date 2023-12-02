@@ -13,8 +13,15 @@ target_include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-add_executable(test test/main.cpp)
+add_executable(client test/client.cpp)
 
-target_compile_features(test PUBLIC cxx_std_23)
+target_compile_features(client PUBLIC cxx_std_23)
 
-target_link_libraries(test PRIVATE wu-net)
+target_link_libraries(client PRIVATE wu-net)
+
+# Server
+add_executable(server test/server.cpp)
+
+target_compile_features(server PUBLIC cxx_std_23)
+
+target_link_libraries(server PRIVATE wu-net)

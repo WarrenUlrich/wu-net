@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <utility>
 #include <vector>
+#include <poll.h>
 
 namespace net {
 enum class tcp_stream_error { invalid_address_format };
@@ -87,7 +88,7 @@ protected:
       *pptr() = traits_type::to_char_type(ch);
       pbump(1);
     }
-    
+
     if (sync() == 0) {
       return ch;
     } else {
@@ -202,6 +203,48 @@ public:
     return true;
   }
 
+  bool is_ready_for_read(int timeout_ms) {
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(_sock_fd, &read_fds);
+
+    struct timeval timeout;
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+
+    int result = select(_sock_fd + 1, &read_fds, nullptr,
+                        nullptr, &timeout);
+    if (result < 0) {
+      // Handle error
+      return false;
+    }
+
+    return FD_ISSET(_sock_fd, &read_fds);
+  }
+
+  bool ready_for_write(int timeout_ms) {
+        struct pollfd fds[1];
+        fds[0].fd = _sock_fd;
+        fds[0].events = POLLOUT;
+
+        int ret = poll(fds, 1, timeout_ms);
+        if (ret < 0) {
+            // Error occurred
+            return false;
+        } 
+        if (ret == 0) {
+            // Timeout
+            return false;
+        } 
+        if (fds[0].revents & POLLOUT) {
+            // Socket is ready for write
+            return true;
+        }
+
+        // Other cases, like error on socket
+        return false;
+    }
+
   static std::expected<tcp_stream, std::error_code>
   connect(std::string_view addr) noexcept;
 
@@ -214,7 +257,6 @@ std::expected<tcp_stream, std::error_code>
 tcp_stream::connect(std::string_view addr_str) noexcept {
   size_t colon_pos = addr_str.find(':');
   if (colon_pos == std::string_view::npos) {
-    std::cout << "Failed to connect\n";
     return std::unexpected(make_error_code(
         tcp_stream_error::invalid_address_format));
   }
@@ -258,4 +300,5 @@ tcp_stream::connect(std::string_view addr_str) noexcept {
 
   return tcp_stream(sock_fd);
 }
+
 } // namespace net
