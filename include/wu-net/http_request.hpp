@@ -3,6 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include <chrono>
+#include <memory>
 
 namespace net {
 enum class http_method {
@@ -31,7 +32,7 @@ private:
   std::string _host;
   int _port;
   std::unordered_map<std::string, std::string> _headers;
-  std::string _body;
+  std::shared_ptr<std::istream> _body;
   bool _keep_alive;
   std::chrono::milliseconds _timeout;
 };

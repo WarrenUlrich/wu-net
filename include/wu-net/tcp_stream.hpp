@@ -430,11 +430,9 @@ public:
         }
       }
 
-      // Connection successful
       return tcp_stream(sock_fd);
     }
 
-    // All connection attempts failed
     return std::nullopt;
   }
 
